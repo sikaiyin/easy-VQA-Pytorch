@@ -18,7 +18,7 @@ pip install -r requirements.txt
 To run the model,
 
 ```shell
-python train.py
+python model.py
 ```
 
 ## Reference
