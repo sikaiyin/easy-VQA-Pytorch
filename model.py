@@ -17,27 +17,23 @@ from skimage import io, transform
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 8, 3, 1)
-        self.conv2 = nn.Conv2d(8, 16, 3, 1)
-        self.conv3 = nn.Conv2d(16, 16, 3, 1)
-        self.conv4 = nn.Conv2d(16, 32, 3, 1)
-
+        self.conv1 = nn.Conv2d(3, 80, 3, 1)
+        self.conv2 = nn.Conv2d(80, 160, 3, 1)
+        self.conv3 = nn.Conv2d(160, 32, 3, 1)
+        self.conv4 = nn.Conv2d(32, 32, 3, 1)
 
         self.maxpool1 = nn.MaxPool2d(2)
         self.maxpool2 = nn.MaxPool2d(2)
         self.maxpool3 = nn.MaxPool2d(2)
 
 
-        self.dropout1 = nn.Dropout(0.1)
+        self.fc1 = nn.Linear(5408, 32)
 
-        self.fc1 = nn.Linear(2704, 32)
-
-        self.fcq1 = nn.Linear(27, 32)
-        self.fcq2 = nn.Linear(32, 32)
+        self.fcq1 = nn.Linear(27, 320)
+        self.fcq2 = nn.Linear(320, 32)
 
         self.fc2 = nn.Linear(32, 13)
         self.fc3 = nn.Linear(13, 13)
-        self.dropout2 = nn.Dropout(0.2)
 
 
     def forward(self, im_input, q_input, big_model):
@@ -49,7 +45,6 @@ class Net(nn.Module):
         if big_model:
             x1 = self.conv4(x1)
             x1 = self.maxpool3(x1)
-            x1 = self.dropout1(x1)
         x1 = torch.flatten(x1, 1)
         x1 = self.fc1(x1)
         x1 = F.tanh(x1)
@@ -62,7 +57,6 @@ class Net(nn.Module):
 
         pred = self.fc2(combined_feature)
         pred = F.tanh(pred)
-        pred = self.dropout2(pred)
         pred = self.fc3(pred)
         return pred
 
@@ -75,7 +69,6 @@ class MyDataset(Dataset):
         self.img_paths = self.extract_paths(self.image_path)
         self.transform = transform
         self.all_answers = self.read_answers(os.path.join(self.root_path, '../answers.txt'))
-
         tokenizer = Tokenizer()
         tokenizer.fit_on_texts(self.texts)
         self.text_seqs = tokenizer.texts_to_matrix(self.texts)
@@ -109,7 +102,7 @@ class MyDataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        image = io.imread(self.img_paths[self.image_ids[idx]])
+        image = img_to_array(load_img(self.img_paths[self.image_ids[idx]]))
 
         if self.transform:
             image = self.transform(image)
@@ -120,19 +113,24 @@ class MyDataset(Dataset):
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
+
     for batch_idx, (sample, label) in enumerate(train_loader):
+        correct_train = 0
         img, ques, target = sample['image'].to(device), sample['question'].to(device), label.to(device)
         target = target.view(ques.shape[0])
         optimizer.zero_grad()
         output = model(img, ques, False)
         NLL = nn.CrossEntropyLoss()  
         loss = NLL(output, target)
+        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+        correct_train += pred.eq(target.view_as(pred)).sum().item()
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\n'.format(
                 epoch, batch_idx * len(ques), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
+            print("Accuracy: {}%\n".format(correct_train / len(ques)))
 
 def test(model, device, test_loader):
     model.eval()
@@ -142,6 +140,7 @@ def test(model, device, test_loader):
     with torch.no_grad():
         for batch_idx, (sample, label) in enumerate(test_loader):
             img, ques, target = sample['image'].to(device), sample['question'].to(device), label.to(device)
+            target = target.view(ques.shape[0])
             output = model(img, ques, False)
             NLL = nn.CrossEntropyLoss()
             test_loss += NLL(output, target).item()# sum up batch loss
@@ -157,51 +156,53 @@ def test(model, device, test_loader):
 
 def main():
     # Training settings
-    parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
+    parser = argparse.ArgumentParser(description='PyTorch Easy-VQA Example')
     parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=64, metavar='N',
-                        help='input batch size for testing (default: 1000)')
+                        help='input batch size for testing (default: 64)')
     parser.add_argument('--epochs', type=int, default=10, metavar='N',
-                        help='number of epochs to train (default: 14)')
-    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
-                        help='learning rate (default: 1.0)')
-    parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
-                        help='Learning rate step gamma (default: 0.7)')
+                        help='number of epochs to train (default: 10)')
+    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
+                        help='learning rate (default: 1e-4)')
+    parser.add_argument('--gamma', type=float, default=0.1, metavar='M',
+                        help='Learning rate step gamma (default: 0.1)')
     parser.add_argument('--dry-run', action='store_true', default=False,
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
+    parser.add_argument('--gpu', default=False,
+                        help='GPU usage (default: False))')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
-    parser.add_argument('--save-model', action='store_true', default=False,
+    parser.add_argument('--save-model', action='store_true', default=True,
                         help='For Saving the current Model')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if (torch.cuda.is_available() and args.gpu) else 'cpu')
 
     train_kwargs = {'batch_size': args.batch_size}
     test_kwargs = {'batch_size': args.test_batch_size}
     if torch.cuda.is_available():
         cuda_kwargs = {'num_workers': 1,
-                       'pin_memory': True,
-                       'shuffle': True}
+                       'pin_memory': True}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
     transform=transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((127.5,127.5,127.5), (255, 255, 255))
+        transforms.Normalize((0.90441555, 0.90574956, 0.89646965), (0.19336925, 0.18681642, 0.20578428))
         ])
-    dataset1 = MyDataset('/home/sikai/easyVQA-pytorch/data/train', transform)
-    dataset2 = MyDataset('/home/sikai/easyVQA-pytorch/data/test', transform)
-    train_loader = torch.utils.data.DataLoader(dataset1, shuffle=True, **train_kwargs)
-    test_loader = torch.utils.data.DataLoader(dataset2, shuffle=True, **test_kwargs)
+
+    dataset1 = MyDataset('./data/train', transform)
+    dataset2 = MyDataset('./data/test', transform)
+    train_loader = torch.utils.data.DataLoader(dataset1, shuffle=False, num_workers=4, **train_kwargs)
+    test_loader = torch.utils.data.DataLoader(dataset2, shuffle=False, num_workers=4, **test_kwargs)
     print("The length of train_loader is {}, and test_loader is {}".format(len(train_loader), len(test_loader)))
 
     model = Net().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters())
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
@@ -210,7 +211,7 @@ def main():
         scheduler.step()
 
     if args.save_model:
-        torch.save(model.state_dict(), "basic.pt")
+        torch.save(model.state_dict(), "model.pt")
 
 
 if __name__ == '__main__':
